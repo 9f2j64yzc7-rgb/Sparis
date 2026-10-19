@@ -102,23 +102,47 @@ const LOGO = logoSvg("#555");
 const DAYS = ["Pzt","Sal","Çar","Per","Cum","Cmt","Paz"];
 const DAYS_LONG = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"];
 const BASES = ["Tavuk","Kuru tavuk","Tavuk hindi","Kuru tavuk hindi","Hindi","Kuru hindi","Dana hindi","Kuru dana hindi","Dana","Kuru dana"];
-const PRODUCTS = [...BASES.flatMap(b => [b + " beyaz", b + " kırmızı"]), "Steak"];
+const PRODUCTS = [...BASES.flatMap(b => [b + " beyaz", b + " kırmızı"]), "Kıyma baran", "Kıyma beyaz", "Kıyma normal", "Steak"];
 const VAULT = "dt_vault_v2";
 const AUTOLOCK_MS = 2 * 60 * 1000;
+const defaultDrivers = () => ["Şoför 1", "Şoför 2", "Şoför 3", "Şoför 4"];
+const defaultDb = () => ({ customers: [], drivers: { 0: defaultDrivers(), 1: defaultDrivers(), 2: defaultDrivers(), 3: defaultDrivers(), 4: defaultDrivers() } });
 
 const app = document.getElementById("app");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const nf = n => (Math.round(n * 10) / 10).toLocaleString("tr-TR");
 const tl = n => Math.round(n).toLocaleString("tr-TR") + " ₺";
-const uid = () => Math.random().toString(36).slice(2, 10);
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const todayIdx = () => (new Date().getDay() + 6) % 7;
-const byName = (a, b) => a.name.localeCompare(b.name, "tr");
-["Kıyma baran", "Kıyma beyaz", "Kıyma normal"].forEach(k => { if (!PRODUCTS.includes(k)) PRODUCTS.splice(PRODUCTS.length - 1, 0, k); });
+const byName = (a, b) => (a.name || "").localeCompare(b.name || "", "tr");
 
 const lineKg = l => (Number(l.adet) || 1) * (Number(l.kg) || 0);
 const deliveryKg = c => c.lines.reduce((s, l) => s + lineKg(l), 0);
 const deliveryTL = c => c.lines.reduce((s, l) => s + lineKg(l) * (Number(l.price) || 0), 0);
 const dayTag = i => i === todayIdx() ? "Bugün" : i === (todayIdx() + 1) % 7 ? "Yarın" : "";
+
+/* Eski/eksik kayıtları güvenli hale getir */
+function normalizeDb(raw) {
+  const base = defaultDb();
+  let out;
+  if (Array.isArray(raw)) out = { customers: raw, drivers: base.drivers };
+  else out = { customers: Array.isArray(raw && raw.customers) ? raw.customers : [], drivers: (raw && raw.drivers) || {} };
+  for (let i = 0; i < 5; i++) {
+    const a = Array.isArray(out.drivers[i]) ? out.drivers[i] : [];
+    out.drivers[i] = [0, 1, 2, 3].map(k => (typeof a[k] === "string" && a[k]) ? a[k] : "Şoför " + (k + 1));
+  }
+  out.customers = out.customers.map(c => ({
+    id: c.id || uid(),
+    name: c.name || "",
+    address: c.address || "",
+    phone: c.phone || "",
+    note: c.note || "",
+    tour: [1, 2, 3, 4].includes(Number(c.tour)) ? Number(c.tour) : 1,
+    days: Array.isArray(c.days) ? c.days.map(Number) : [],
+    lines: Array.isArray(c.lines) ? c.lines : []
+  }));
+  return out;
+}
 
 /* ---------- Şifreleme ---------- */
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -148,9 +172,9 @@ let storageOk = true;
 try { localStorage.setItem("dt_ping", "1"); localStorage.removeItem("dt_ping"); } catch (e) { storageOk = false; }
 const cryptoOk = !!(window.crypto && crypto.subtle);
 
-let db = { customers: [], drivers: { 0:[1,2,3,4], 1:[1,2,3,4], 2:[1,2,3,4], 3:[1,2,3,4], 4:[1,2,3,4] } };
+let db = defaultDb();
 let key = null, salt = null;
-let st = { tab: "rota", sel: (todayIdx() + 1) % 7, query: "", draft: null, isNew: false, confirmDel: false, backup: false, backupMsg: "", driverModal: false };
+let st = { tab: "rota", sel: (todayIdx() + 1) % 7, query: "", draft: null, isNew: false, confirmDel: false, backup: false, backupMsg: "", driverModal: false, driverDay: 0 };
 
 function toast(t) {
   const d = document.createElement("div");
@@ -159,6 +183,7 @@ function toast(t) {
 }
 
 async function save() {
+  if (!key || !salt) { toast("Kaydedilemedi!"); return false; }
   try {
     const v = await encryptJson(key, db);
     localStorage.setItem(VAULT, JSON.stringify({ salt: b64(salt), iv: v.iv, ct: v.ct }));
@@ -171,7 +196,8 @@ async function save() {
 
 /* ---------- Kilit ekranı ---------- */
 function lockScreen(err) {
-  key = null; db = { customers: [], drivers: {} }; st.draft = null; st.backup = false;
+  key = null; salt = null; db = defaultDb();
+  st.draft = null; st.backup = false; st.driverModal = false; st.confirmDel = false; st.query = "";
   if (!cryptoOk || !storageOk) {
     app.innerHTML = `<div class="lock">${LOGO}<h1>Bu sayfa burada kayıt tutamıyor</h1>
       <p>Şifreli kayıt için sayfanın https adresinden, telefonun tarayıcısında açılması gerekir.</p></div>`;
@@ -209,10 +235,14 @@ async function setup() {
   if (a.length < 6) { err.textContent = "Şifre en az 6 karakter olmalı."; return; }
   if (a !== b) { err.textContent = "İki şifre aynı değil."; return; }
   document.getElementById("go").disabled = true; err.textContent = "Hazırlanıyor…";
-  salt = crypto.getRandomValues(new Uint8Array(16));
-  key = await deriveKey(a, salt);
-  db = { customers: [], drivers: { 0:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 1:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 2:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 3:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 4:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"] } };
-  if (await save()) startApp(); else lockScreen("Kaydedilemedi.");
+  try {
+    salt = crypto.getRandomValues(new Uint8Array(16));
+    key = await deriveKey(a, salt);
+    db = defaultDb();
+    if (await save()) startApp(); else lockScreen("Kaydedilemedi.");
+  } catch (e) {
+    lockScreen("Kurulum başarısız oldu.");
+  }
 }
 async function login() {
   const pw = document.getElementById("pw").value;
@@ -223,12 +253,8 @@ async function login() {
     const v = JSON.parse(localStorage.getItem(VAULT));
     const s = unb64(v.salt);
     const k = await deriveKey(pw, s);
-    let loaded = await decryptJson(k, v);
-    if (Array.isArray(loaded)) {
-      db = { customers: loaded, drivers: { 0:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 1:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 2:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 3:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"], 4:["Şoför 1","Şoför 2","Şoför 3","Şoför 4"] } };
-    } else {
-      db = loaded;
-    }
+    const loaded = await decryptJson(k, v);
+    db = normalizeDb(loaded);
     key = k; salt = s;
     startApp();
   } catch (e) {
@@ -244,7 +270,7 @@ document.addEventListener("visibilitychange", () => {
   else if (key && hiddenAt && Date.now() - hiddenAt > AUTOLOCK_MS) lockScreen();
 });
 
-/* ---------- Görünümler ve Harita Mantığı (Lich Merkezli) ---------- */
+/* ---------- Görünümler ---------- */
 const header = () => `<header>${LOGO}
   <div class="grow"><div class="sub">LICH MERKEZLİ ROTA & SİPARİŞ</div><div class="nm">ABDULKADIR YILDIRIM</div><div class="ph">017642741540</div></div>
   <button class="lockbtn" data-act="lock">Kilitle</button></header>`;
@@ -252,7 +278,7 @@ const header = () => `<header>${LOGO}
 function cardHTML(c) {
   const lines = c.lines.map(l => `<div><span>${esc(l.product)}</span><b>${Number(l.adet) || 1} × ${nf(Number(l.kg) || 0)} kg</b></div>`).join("");
   const money = deliveryTL(c);
-  return `<div class="card" data-act="edit" data-id="${c.id}" role="button">
+  return `<div class="card" data-act="edit" data-id="${esc(c.id)}" role="button">
     <div class="row" style="align-items:flex-start"><div class="nm">${esc(c.name || "İsimsiz dükkan")}</div>
     <div class="kg">${nf(deliveryKg(c))} kg${money > 0 ? `<small>${tl(money)}</small>` : ""}</div></div>
     ${c.address ? `<div class="info">📍 ${esc(c.address)}</div>` : ""}
@@ -260,7 +286,7 @@ function cardHTML(c) {
     ${lines ? `<div class="lines">${lines}</div>` : ""}
     <div class="dchips">
       <span>Tur: ${c.tour || 1}. Tur</span>
-      ${c.days.length ? [...c.days].sort().map(d => `<span>${DAYS[d]}</span>`).join("") : `<span style="border-color:var(--line);color:var(--muted)">Gün seçilmedi</span>`}
+      ${c.days.length ? [...c.days].sort((a, b) => a - b).map(d => `<span>${DAYS[d]}</span>`).join("") : `<span style="border-color:var(--line);color:var(--muted)">Gün seçilmedi</span>`}
     </div>
     ${c.note ? `<div class="note">${esc(c.note)}</div>` : ""}</div>`;
 }
@@ -268,44 +294,47 @@ function cardHTML(c) {
 function rotaView() {
   const selDay = st.sel;
   const isWeekend = selDay >= 5;
-  const list = db.customers.filter(c => c.days.includes(selDay)).sort((a,b) => (a.tour - b.tour) || byName(a,b));
-  
+  const list = db.customers.filter(c => c.days.includes(selDay)).sort((a, b) => ((a.tour || 1) - (b.tour || 1)) || byName(a, b));
+
   const chips = DAYS.map((d, i) => {
     const n = db.customers.filter(c => c.days.includes(i)).length;
     return `<button class="chip ${selDay === i ? "on" : ""}" data-act="day" data-v="${i}"><b>${d}</b><small>${n} dükkan</small></button>`;
   }).join("");
 
-  const todayDate = new Date().getDate();
-  const isCloppenburgDay = (todayDate === 15 || todayDate === 30) && selDay < 5;
+  // Seçili günün bu haftaki gerçek tarihi (ayın 15'i / 30'u kontrolü)
+  const now = new Date();
+  const selDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - todayIdx() + selDay);
+  const dd = selDate.getDate();
+  const isCloppenburgDay = (dd === 15 || dd === 30) && selDay < 5;
 
-  let driversArr = (db.drivers && db.drivers[selDay]) ? db.drivers[selDay] : ["Şoför 1", "Şoför 2", "Şoför 3", "Şoför 4"];
+  const driversArr = (db.drivers && db.drivers[selDay]) ? db.drivers[selDay] : defaultDrivers();
 
   let tourHTML = "";
   if (!isWeekend) {
     for (let t = 1; t <= 4; t++) {
       const tourList = list.filter(c => (c.tour || 1) === t);
       const tourKg = tourList.reduce((s, c) => s + deliveryKg(c), 0);
-      const driverName = driversArr[t-1] || `Şoför ${t}`;
-      
+      const driverName = driversArr[t - 1] || `Şoför ${t}`;
+
       tourHTML += `<div class="map-box">
         <div class="row" style="align-items:center">
           <div><span class="tour-badge">${t}. TUR (Merkez: Lich ➔ Lich)</span> <b style="font-size:15px">${esc(driverName)}</b></div>
           <button class="link" style="margin:0;font-size:12px" data-act="editdrivers" data-day="${selDay}">Şoför Düzenle</button>
         </div>
         <div class="muted" style="margin-top:4px">Toplam Yük: <b>${nf(tourKg)} kg</b> (${tourList.length} Durak)</div>
-        ${tourList.length ? `<div style="margin-top:8px">${tourList.map(c => `<div style="font-size:14px;padding:3px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between"><span>📌 ${esc(c.name)} <small style="color:var(--muted)">(${esc(c.address)})</small></span><b>${nf(deliveryKg(c))} kg</b></div>`).join("")}</div>` : `<div class="muted" style="margin-top:6px">Bu turda dükkan yok.</div>`}
+        ${tourList.length ? `<div style="margin-top:8px">${tourList.map(c => `<div style="font-size:14px;padding:3px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px"><span>📌 ${esc(c.name)} <small style="color:var(--muted)">(${esc(c.address)})</small></span><b style="white-space:nowrap">${nf(deliveryKg(c))} kg</b></div>`).join("")}</div>` : `<div class="muted" style="margin-top:6px">Bu turda dükkan yok.</div>`}
       </div>`;
     }
   }
 
   return `<div class="chips">${chips}</div><main>
     <div class="row"><h2>${DAYS_LONG[selDay]}${dayTag(selDay) ? `<span class="tag">${dayTag(selDay)}</span>` : ""}</h2><div class="muted">${list.length} müşteri</div></div>
-    
-    ${isCloppenburgDay ? `<div class="box" style="border-color:var(--warn);margin-top:12px"><div class="l" style="color:var(--warn)">ÖZEL SEVKİYAT UYARISI</div><div style="font-weight:600;margin-top:2px">Bugün Cloppenburg Özel Turu Dönemi (Ayın 15/30'u planı)</div></div>` : ""}
+
+    ${isCloppenburgDay ? `<div class="box" style="border-color:var(--warn);margin-top:12px"><div class="l" style="color:var(--warn)">ÖZEL SEVKİYAT UYARISI</div><div style="font-weight:600;margin-top:2px">Bu gün Cloppenburg Özel Turu Dönemi (Ayın 15/30'u planı)</div></div>` : ""}
 
     <div class="box" style="margin-top:12px;background:var(--surface2)">
       <div class="l">Almanya Haritası & Rota Özeti (Merkez: Lich ➔ Dağıtım ➔ Lich)</div>
-      <div class="v" style="font-size:20px;margin-top:4px">${nf(list.reduce((s,c)=>s+deliveryKg(c),0))} kg toplam yük</div>
+      <div class="v" style="font-size:20px;margin-top:4px">${nf(list.reduce((s, c) => s + deliveryKg(c), 0))} kg toplam yük</div>
     </div>
 
     ${isWeekend ? `<div class="empty">Hafta sonu düzenli tur sevkiyatı bulunmuyor.</div>` : tourHTML}
@@ -321,7 +350,7 @@ function haftaView() {
     const kg = list.reduce((s, c) => s + deliveryKg(c), 0), money = list.reduce((s, c) => s + deliveryTL(c), 0);
     return `<div class="card" data-act="goday" data-v="${i}" role="button">
       <div class="row"><b>${d}${dayTag(i) ? `<span class="tag">${dayTag(i)}</span>` : ""}</b><span class="muted">${list.length} müşteri</span></div>
-      ${list.length ? `<div class="muted" style="margin-top:4px">Toplam: <b>${nf(kg)} kg</b>${money > 0 ? "· " + tl(money) : ""}</div>`
+      ${list.length ? `<div class="muted" style="margin-top:4px">Toplam: <b>${nf(kg)} kg</b>${money > 0 ? " · " + tl(money) : ""}</div>`
         : `<div class="muted" style="margin-top:4px">Sevkiyat yok</div>`}</div>`;
   }).join("");
   return `<main><div class="box"><div class="l">Haftalık Genel Toplam</div><div class="v" style="font-size:30px">${wtl > 0 ? tl(wtl) : nf(wkg) + " kg"}</div>
@@ -330,7 +359,7 @@ function haftaView() {
 
 function listHTML() {
   const q = st.query.toLocaleLowerCase("tr");
-  const l = db.customers.filter(c => (c.name + " " + c.address).toLocaleLowerCase("tr").includes(q)).sort(byName);
+  const l = db.customers.filter(c => ((c.name || "") + " " + (c.address || "")).toLocaleLowerCase("tr").includes(q)).sort(byName);
   if (!db.customers.length) return `<div class="empty">Henüz dükkan eklenmemiş. Sağ alttaki + düğmesiyle ekle.</div>`;
   if (!l.length) return `<div class="empty">Aramaya uyan dükkan yok.</div>`;
   return l.map(c => cardHTML(c)).join("");
@@ -356,7 +385,7 @@ function editorView() {
     <div class="lrow"><label class="w"><small>Adet</small><input type="number" inputmode="numeric" data-l="adet" data-i="${i}" value="${esc(l.adet)}"></label>
     <label><small>Kg (tanesi)</small><input type="number" inputmode="decimal" data-l="kg" data-i="${i}" value="${esc(l.kg)}"></label>
     <label><small>Kg fiyatı ₺</small><input type="number" inputmode="decimal" data-l="price" data-i="${i}" value="${esc(l.price)}"></label></div>
-    <div class="lt" id="lt${i}">${lineKg(l) > 0 ? `${Number(l.adet) || 1} × ${nf(Number(l.kg) \vert{}\vert{} 0)} kg = <b>${nf(lineKg(l))} kg</b>` : ""}</div></div>`).join("");
+    <div class="lt" id="lt${i}">${lineKg(l) > 0 ? `${Number(l.adet) || 1} × ${nf(Number(l.kg) || 0)} kg = <b>${nf(lineKg(l))} kg</b>` : ""}</div></div>`).join("");
   return `<div class="ov"><div class="ovh"><span>${st.isNew ? "Yeni Dükkan Ekle" : "Dükkan Düzenle"}</span><button data-act="closeed" aria-label="Kapat">×</button></div>
     <div style="padding:4px 16px 30px">
     <label>Dükkan adı<input data-f="name" value="${esc(d.name)}"></label>
@@ -364,10 +393,10 @@ function editorView() {
     <label>Telefon<input type="tel" data-f="phone" value="${esc(d.phone)}"></label>
     <label>Hangi Turda Yer Alsın?</label>
     <select data-f="tour">
-      <option value="1" ${d.tour===1?"selected":""}>1. Tur</option>
-      <option value="2" ${d.tour===2?"selected":""}>2. Tur</option>
-      <option value="3" ${d.tour===3?"selected":""}>3. Tur</option>
-      <option value="4" ${d.tour===4?"selected":""}>4. Tur</option>
+      <option value="1" ${d.tour === 1 ? "selected" : ""}>1. Tur</option>
+      <option value="2" ${d.tour === 2 ? "selected" : ""}>2. Tur</option>
+      <option value="3" ${d.tour === 3 ? "selected" : ""}>3. Tur</option>
+      <option value="4" ${d.tour === 4 ? "selected" : ""}>4. Tur</option>
     </select>
     <label>Hangi Günler Gitmeli?</label>
     <div class="dgrid">${DAYS.map((x, i) => `<button class="${d.days.includes(i) ? "on" : ""}" data-act="tday" data-v="${i}">${x}</button>`).join("")}</div>
@@ -385,8 +414,8 @@ function editorView() {
 
 function driverEditorView() {
   const day = st.driverDay;
-  let arr = (db.drivers && db.drivers[day]) ? db.drivers[day] : ["Şoför 1", "Şoför 2", "Şoför 3", "Şoför 4"];
-  return `<div class="ov"><div class="ovh"><span>${DAYS_LONG[day]} - Şoför İsimleri</span><button data-act="closedrivers" aria-label="Kapat">×</button></div>
+  const arr = (db.drivers && db.drivers[day]) ? db.drivers[day] : defaultDrivers();
+  return `<div class="ov" style="z-index:40"><div class="ovh"><span>${DAYS_LONG[day]} - Şoför İsimleri</span><button data-act="closedrivers" aria-label="Kapat">×</button></div>
     <div style="padding:12px 16px">
       <p class="muted">Bu gün tura çıkacak şoförlerin isimlerini belirleyebilirsin:</p>
       <label>1. Tur Şoförü<input type="text" id="drv0" value="${esc(arr[0])}"></label>
@@ -399,7 +428,7 @@ function driverEditorView() {
 
 function backupView() {
   const v = localStorage.getItem(VAULT) || "";
-  return `<div class="ov"><div class="ovh"><span>Yedekle / Geri Yükle</span><button data-act="closebk" aria-label="Kapat">×</button></div>
+  return `<div class="ov" style="z-index:40"><div class="ovh"><span>Yedekle / Geri Yükle</span><button data-act="closebk" aria-label="Kapat">×</button></div>
     <div style="padding:12px 16px">
     <p class="muted" style="margin-top:0">Yedeği kopyalayıp güvenli bir yere kaydedebilir ya da başka cihaza yükleyebilirsin.</p>
     <textarea id="bk" rows="9" style="font-size:12px">${esc(v)}</textarea>
@@ -408,16 +437,18 @@ function backupView() {
 }
 
 function render() {
-  const ov = document.querySelector(".ov"); const top = ov ? ov.scrollTop : 0;
+  const ovs = document.querySelectorAll(".ov");
+  const tops = [...ovs].map(o => o.scrollTop);
   const view = st.tab === "rota" ? rotaView() : st.tab === "hafta" ? haftaView() : musteriView();
   app.innerHTML = header() + view +
     `<nav>${[["rota","Rota & Tur"],["hafta","Haftalık Özet"],["musteri","Dükkanlar"]].map(([k, l]) => `<button class="${st.tab === k ? "on" : ""}" data-act="tab" data-v="${k}">${l}</button>`).join("")}</nav>` +
     (st.draft ? editorView() : "") + (st.driverModal ? driverEditorView() : "") + (st.backup ? backupView() : "");
-  const o = document.querySelector(".ov"); if (o && ov) o.scrollTop = top;
+  document.querySelectorAll(".ov").forEach((o, i) => { if (tops[i]) o.scrollTop = tops[i]; });
 }
 
 /* ---------- Olaylar ---------- */
 function openEditor(c) {
+  if (!c && st.isNew === false && arguments.length && c === undefined) return;
   st.isNew = !c; st.confirmDel = false;
   st.draft = c ? JSON.parse(JSON.stringify(c)) : { id: uid(), name: "", address: "", phone: "", tour: 1, days: [], lines: [], note: "" };
   render();
@@ -433,34 +464,41 @@ app.addEventListener("click", async e => {
     case "goday": st.sel = Number(v); st.tab = "rota"; render(); break;
     case "lock": lockScreen(); break;
     case "add": openEditor(null); break;
-    case "edit": openEditor(db.customers.find(c => c.id === el.dataset.id)); break;
+    case "edit": {
+      const c = db.customers.find(c => c.id === el.dataset.id);
+      if (c) openEditor(c);
+      break;
+    }
     case "closeed": st.draft = null; render(); break;
-    case "tday": d.days = d.days.includes(Number(v)) ? d.days.filter(x => x !== Number(v)) : [...d.days, Number(v)]; render(); break;
-    case "addline": d.lines.push({ product: PRODUCTS[0], adet: 1, kg: "", price: "" }); render(); break;
-    case "delline": d.lines.splice(i, 1); render(); break;
+    case "tday": if (!d) break; d.days = d.days.includes(Number(v)) ? d.days.filter(x => x !== Number(v)) : [...d.days, Number(v)]; render(); break;
+    case "addline": if (!d) break; d.lines.push({ product: PRODUCTS[0], adet: 1, kg: "", price: "" }); render(); break;
+    case "delline": if (!d) break; d.lines.splice(i, 1); render(); break;
     case "delask": st.confirmDel = true; render(); break;
     case "delno": st.confirmDel = false; render(); break;
-    case "delyes":
-      db.customers = db.customers.filter(c => c.id !== d.id); st.draft = null;
-      if (await save()) toast("Silindi"); render(); break;
-    case "saveed":
-      if (!d.name.trim()) { toast("Dükkan adını yaz"); break; }
-      db.customers = st.isNew ? [...db.customers, d] : db.customers.map(c => c.id === d.id ? d : c);
-      st.draft = null;
-      if (await save()) toast("Kaydedildi");
+    case "delyes": {
+      if (!d) break;
+      const before = db.customers;
+      db.customers = db.customers.filter(c => c.id !== d.id);
+      if (await save()) { st.draft = null; toast("Silindi"); }
+      else db.customers = before;
       render(); break;
+    }
+    case "saveed": {
+      if (!d) break;
+      if (!d.name.trim()) { toast("Dükkan adını yaz"); break; }
+      const before = db.customers;
+      db.customers = st.isNew ? [...db.customers, d] : db.customers.map(c => c.id === d.id ? d : c);
+      if (await save()) { st.draft = null; toast("Kaydedildi"); }
+      else db.customers = before;
+      render(); break;
+    }
     case "editdrivers":
       st.driverDay = Number(el.dataset.day); st.driverModal = true; render(); break;
     case "closedrivers":
       st.driverModal = false; render(); break;
     case "savedrivers":
       if (!db.drivers) db.drivers = {};
-      db.drivers[st.driverDay] = [
-        document.getElementById("drv0").value || "Şoför 1",
-        document.getElementById("drv1").value || "Şoför 2",
-        document.getElementById("drv2").value || "Şoför 3",
-        document.getElementById("drv3").value || "Şoför 4"
-      ];
+      db.drivers[st.driverDay] = [0, 1, 2, 3].map(k => (document.getElementById("drv" + k).value || "").trim() || "Şoför " + (k + 1));
       st.driverModal = false;
       if (await save()) toast("Şoförler kaydedildi");
       render(); break;
@@ -472,13 +510,14 @@ app.addEventListener("click", async e => {
       render(); break;
     case "bkrestore": {
       const txt = document.getElementById("bk").value.trim();
+      let v2;
       try {
-        const v2 = JSON.parse(txt);
-        if (!v2.salt || !v2.iv || !v2.ct) throw new Error("bad");
-        if (!confirm("Mevcut liste silinip yedek yüklenecek?")) break;
-        localStorage.setItem(VAULT, JSON.stringify({ salt: v2.salt, iv: v2.iv, ct: v2.ct }));
-        lockScreen();
-      } catch (err) { st.backupMsg = "Geçersiz yedek."; render(); }
+        v2 = JSON.parse(txt);
+        if (!v2 || !v2.salt || !v2.iv || !v2.ct) throw new Error("bad");
+      } catch (err) { st.backupMsg = "Geçersiz yedek."; render(); break; }
+      if (!confirm("Mevcut liste silinip yedek yüklenecek. Devam edilsin mi?")) break;
+      localStorage.setItem(VAULT, JSON.stringify({ salt: v2.salt, iv: v2.iv, ct: v2.ct }));
+      lockScreen("Yedek yüklendi. Yedeğin şifresini gir.");
       break;
     }
   }
@@ -492,7 +531,8 @@ app.addEventListener("input", e => {
     else d[t.dataset.f] = t.value;
   }
   if (t.dataset.l) {
-    const i = Number(t.dataset.i); d.lines[i][t.dataset.l] = t.value;
+    const i = Number(t.dataset.i); if (!d.lines[i]) return;
+    d.lines[i][t.dataset.l] = t.value;
     const lt = document.getElementById("lt" + i), l = d.lines[i];
     if (lt) lt.innerHTML = lineKg(l) > 0 ? `${Number(l.adet) || 1} × ${nf(Number(l.kg) || 0)} kg = <b>${nf(lineKg(l))} kg</b>` : "";
     const tt = document.getElementById("dtot"); if (tt) tt.innerHTML = draftTotals();
