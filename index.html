@@ -111,7 +111,8 @@ const nf = n => (Math.round(n * 10) / 10).toLocaleString("tr-TR");
 const tl = n => Math.round(n).toLocaleString("tr-TR") + " ₺";
 const uid = () => Math.random().toString(36).slice(2, 10);
 const todayIdx = () => (new Date().getDay() + 6) % 7;
-const byName = (a, b) => a.name.localeCompare(b.name, "tr");
+const PRODUCTS = [...BASES.flatMap(b => [b + " beyaz", b + " kırmızı"]), "Kıyma baran", "Kıyma beyaz", "Kıyma normal", "Steak"];
+
 const lineKg = l => (Number(l.adet) || 1) * (Number(l.kg) || 0);
 const deliveryKg = c => c.lines.reduce((s, l) => s + lineKg(l), 0);
 const deliveryTL = c => c.lines.reduce((s, l) => s + lineKg(l) * (Number(l.price) || 0), 0);
